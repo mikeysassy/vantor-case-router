@@ -1,7 +1,7 @@
 public with sharing class CaseTypeRouterGetContext {
     @InvocableMethod(
         label='Case Type Router: Get Context'
-        description='Gets Case subject and deterministic routing recommendation'
+        description='Returns Case subject, supplied email, and current Account Region routing context'
     )
     public static List<Result> execute(List<Request> requests) {
         List<Result> results = new List<Result>();
@@ -15,7 +15,7 @@ public with sharing class CaseTypeRouterGetContext {
                 }
 
                 List<Case> rows = [
-                    SELECT Id, Subject
+                    SELECT Id, Subject, SuppliedEmail, AccountId, Account.Region__c, Account_Region__c
                     FROM Case
                     WHERE Id = :req.caseId
                     WITH USER_MODE
@@ -27,29 +27,13 @@ public with sharing class CaseTypeRouterGetContext {
                     continue;
                 }
 
-                String subject = rows[0].Subject == null ? '' : rows[0].Subject;
-                String normalized = subject.toLowerCase();
-                String mappedType = '';
-                Boolean sapTitle = false;
-
-                if (normalized.contains('sap')) {
-                    sapTitle = true;
-                    mappedType = 'SAP';
-                } else if (normalized.contains('international defense') || normalized.contains('defense')) {
-                    mappedType = 'International Defense';
-                } else if (normalized.contains('amear')) {
-                    mappedType = 'AMEAR';
-                } else if (normalized.contains('apac')) {
-                    mappedType = 'APAC';
-                } else if (normalized.contains('americas')) {
-                    mappedType = 'Americas';
-                }
-
+                Case caseRecord = rows[0];
                 res.isSuccess = true;
                 res.errorMessage = '';
-                res.caseSubject = subject;
-                res.isSapTitle = sapTitle;
-                res.suggestedCaseType = mappedType;
+                res.caseSubject = caseRecord.Subject == null ? '' : caseRecord.Subject;
+                res.suppliedEmail = caseRecord.SuppliedEmail == null ? '' : caseRecord.SuppliedEmail;
+                res.accountRegion = caseRecord.Account_Region__c == null ? '' : caseRecord.Account_Region__c;
+                res.isRegionDefined = caseRecord.AccountId != null && String.isNotBlank(caseRecord.Account.Region__c);
             } catch (Exception e) {
                 res = fail(e.getMessage());
             }
@@ -63,8 +47,9 @@ public with sharing class CaseTypeRouterGetContext {
         res.isSuccess = false;
         res.errorMessage = message;
         res.caseSubject = '';
-        res.isSapTitle = false;
-        res.suggestedCaseType = '';
+        res.suppliedEmail = '';
+        res.accountRegion = '';
+        res.isRegionDefined = false;
         return res;
     }
 
@@ -87,10 +72,13 @@ public with sharing class CaseTypeRouterGetContext {
         @InvocableVariable(label='Case Subject' description='Case title/subject for routing')
         public String caseSubject;
 
-        @InvocableVariable(label='Is SAP Title' description='True when title contains SAP')
-        public Boolean isSapTitle;
+        @InvocableVariable(label='Supplied Email' description='Email-to-case supplied sender address')
+        public String suppliedEmail;
 
-        @InvocableVariable(label='Suggested Case Type' description='Deterministic mapping result')
-        public String suggestedCaseType;
+        @InvocableVariable(label='Account Region' description='Current Account Region (formula) on the Case')
+        public String accountRegion;
+
+        @InvocableVariable(label='Is Region Defined' description='True when the linked Account already has a Region')
+        public Boolean isRegionDefined;
     }
 }

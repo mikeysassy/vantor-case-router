@@ -1,15 +1,7 @@
 public with sharing class CaseTypeRouterSetType {
-    private static final Set<String> ALLOWED_CASE_TYPES = new Set<String>{
-        'AMEAR',
-        'APAC',
-        'International Defense',
-        'Americas',
-        'SAP'
-    };
-
     @InvocableMethod(
-        label='Case Type Router: Set Case Type'
-        description='Sets Case.msCase_Type__c to a validated picklist value'
+        label='Case Type Router: Set Case Account'
+        description='Links a Case to an Account so Account Region (and Tier) resolve via formula'
     )
     public static List<Result> execute(List<Request> requests) {
         List<Result> results = new List<Result>();
@@ -21,37 +13,60 @@ public with sharing class CaseTypeRouterSetType {
                     results.add(res);
                     continue;
                 }
-                if (String.isBlank(req.caseTypeValue)) {
-                    res = fail('caseTypeValue is required');
-                    results.add(res);
-                    continue;
-                }
-                if (!ALLOWED_CASE_TYPES.contains(req.caseTypeValue)) {
-                    res = fail('Unsupported msCase_Type__c value: ' + req.caseTypeValue);
+                if (String.isBlank(req.accountId)) {
+                    res = fail('accountId is required');
                     results.add(res);
                     continue;
                 }
 
-                List<Case> rows = [
-                    SELECT Id, msCase_Type__c
+                Id accountId;
+                try {
+                    accountId = (Id) req.accountId;
+                } catch (Exception e) {
+                    res = fail('Invalid accountId: ' + req.accountId);
+                    results.add(res);
+                    continue;
+                }
+                if (accountId.getSobjectType() != Account.SObjectType) {
+                    res = fail('accountId is not an Account Id: ' + req.accountId);
+                    results.add(res);
+                    continue;
+                }
+
+                List<Account> accounts = [
+                    SELECT Id, Region__c
+                    FROM Account
+                    WHERE Id = :accountId
+                    WITH USER_MODE
+                    LIMIT 1
+                ];
+                if (accounts.isEmpty()) {
+                    res = fail('Account not found: ' + req.accountId);
+                    results.add(res);
+                    continue;
+                }
+
+                List<Case> cases = [
+                    SELECT Id, AccountId
                     FROM Case
                     WHERE Id = :req.caseId
                     WITH USER_MODE
                     LIMIT 1
                 ];
-                if (rows.isEmpty()) {
+                if (cases.isEmpty()) {
                     res = fail('Case not found: ' + req.caseId);
                     results.add(res);
                     continue;
                 }
 
-                Case c = rows[0];
-                c.msCase_Type__c = req.caseTypeValue;
-                update c;
+                Case caseRecord = cases[0];
+                caseRecord.AccountId = accountId;
+                update caseRecord;
 
                 res.isSuccess = true;
                 res.errorMessage = '';
-                res.message = 'Updated msCase_Type__c to ' + req.caseTypeValue;
+                res.message = 'Linked Case to Account ' + accountId
+                    + ' (Region=' + (accounts[0].Region__c == null ? '(none)' : accounts[0].Region__c) + ')';
             } catch (Exception e) {
                 res = fail(e.getMessage());
             }
@@ -77,17 +92,17 @@ public with sharing class CaseTypeRouterSetType {
         public String caseId;
 
         @InvocableVariable(
-            label='Case Type Value'
-            description='Value for Case.msCase_Type__c'
+            label='Account Id'
+            description='Account to link to the Case (drives Account Region)'
             required=true
         )
-        public String caseTypeValue;
+        public String accountId;
     }
 
     public class Result {
         @InvocableVariable(
             label='Success'
-            description='Whether update succeeded'
+            description='Whether the update succeeded'
         )
         public Boolean isSuccess;
 

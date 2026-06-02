@@ -1,32 +1,57 @@
 public with sharing class CaseTypeAiClassifier {
+    public class CandidateAccount {
+        public Id accountId;
+        public String name;
+        public String website;
+        public String region;
+
+        public CandidateAccount(Id accountId, String name, String website, String region) {
+            this.accountId = accountId;
+            this.name = name;
+            this.website = website;
+            this.region = region;
+        }
+    }
+
+    public class ResearchContext {
+        public String suppliedEmail;
+        public String externalSenderEmail;
+        public String externalSenderName;
+        public String externalSenderDomain;
+        public Boolean isInternalForward = false;
+        public String emailContent;
+        public List<CandidateAccount> candidateAccounts = new List<CandidateAccount>();
+    }
+
     public class ClassificationResult {
-        public String predictedType;
+        public String suggestedRegion;
+        public Id matchedAccountId;
         public Decimal confidence;
         public String reason;
     }
 
     public interface Provider {
-        ClassificationResult classify(Case caseRecord, EmailMessage latestEmail, String historySummary);
+        ClassificationResult classify(Case caseRecord, ResearchContext context);
     }
 
     @TestVisible
     static Provider provider;
 
-    public static ClassificationResult classify(Case caseRecord, EmailMessage latestEmail, String historySummary) {
+    public static ClassificationResult classify(Case caseRecord, ResearchContext context) {
         Provider active = (provider == null) ? new EinsteinPromptTemplateProvider() : provider;
-        return active.classify(caseRecord, latestEmail, historySummary);
+        return active.classify(caseRecord, context);
     }
 
     public class EinsteinPromptTemplateProvider implements Provider {
         private final String templateApiName = 'Case_Type_Classifier';
 
-        public ClassificationResult classify(Case caseRecord, EmailMessage latestEmail, String historySummary) {
+        public ClassificationResult classify(Case caseRecord, ResearchContext context) {
             ClassificationResult result = new ClassificationResult();
             try {
-                String context = buildCaseContext(caseRecord, latestEmail, historySummary);
+                String contextText = buildCaseContext(caseRecord, context);
 
                 ConnectApi.WrappedValue wrappedInput = new ConnectApi.WrappedValue();
-                wrappedInput.value = context;
+                wrappedInput.value = contextText;
 
                 ConnectApi.EinsteinPromptTemplateGenerationsInput input =
                     new ConnectApi.EinsteinPromptTemplateGenerationsInput();
@@ -43,55 +68,76 @@ public with sharing class CaseTypeAiClassifier {
                     ConnectApi.EinsteinLLM.generateMessagesForPromptTemplate(templateApiName, input);
 
                 if (generations != null && generations.generations != null && !generations.generations.isEmpty()) {
-                    String raw = generations.generations[0].text;
-                    Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(raw);
-                    result.predictedType = (String) parsed.get('predictedType');
-                    Object confidenceObj = parsed.get('confidence');
-                    if (confidenceObj != null) {
-                        result.confidence = Decimal.valueOf(String.valueOf(confidenceObj));
-                    }
-                    result.reason = (String) parsed.get('reason');
+                    result = parseResult(generations.generations[0].text);
                 }
             } catch (Exception e) {
-                result.predictedType = null;
+                result.suggestedRegion = null;
+                result.matchedAccountId = null;
                 result.confidence = null;
-                result.reason = 'AI classification failed: ' + e.getMessage();
+                result.reason = 'AI research failed: ' + e.getMessage();
             }
             return result;
         }
 
-        private String buildCaseContext(Case caseRecord, EmailMessage latestEmail, String historySummary) {
-            String suppliedDomain = extractDomain(caseRecord.SuppliedEmail);
-            String fromDomain = extractDomain(latestEmail == null ? null : latestEmail.FromAddress);
+        @TestVisible
+        private ClassificationResult parseResult(String raw) {
+            ClassificationResult parsedResult = new ClassificationResult();
+            Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(raw);
+            parsedResult.suggestedRegion = (String) parsed.get('suggestedRegion');
+
+            Object accObj = parsed.get('matchedAccountId');
+            String accString = accObj == null ? null : String.valueOf(accObj);
+            if (String.isNotBlank(accString) && accString != 'null') {
+                try {
+                    parsedResult.matchedAccountId = (Id) accString;
+                } catch (Exception ignored) {
+                    parsedResult.matchedAccountId = null;
+                }
+            }
+
+            Object confidenceObj = parsed.get('confidence');
+            if (confidenceObj != null) {
+                parsedResult.confidence = Decimal.valueOf(String.valueOf(confidenceObj));
+            }
+            parsedResult.reason = (String) parsed.get('reason');
+            return parsedResult;
+        }
+
+        private String buildCaseContext(Case caseRecord, ResearchContext context) {
             List<String> lines = new List<String>{
                 'Case Id: ' + String.valueOf(caseRecord.Id),
                 'Subject: ' + safeText(caseRecord.Subject),
                 'Description: ' + safeText(caseRecord.Description),
                 'Origin: ' + safeText(caseRecord.Origin),
-                'Supplied Email: ' + safeText(caseRecord.SuppliedEmail),
-                'Supplied Email Domain: ' + safeText(suppliedDomain),
-                'From Address: ' + safeText(latestEmail == null ? null : latestEmail.FromAddress),
-                'From Address Domain: ' + safeText(fromDomain),
-                'Latest Email Body: ' + safeText(latestEmail == null ? null : latestEmail.TextBody),
-                'Has .gov Domain Signal: ' + String.valueOf(isGovOrMilDomain(suppliedDomain) || isGovOrMilDomain(fromDomain)),
-                'Recent Similar Case Type Summary: ' + safeText(historySummary)
+                'Case Supplied Email: ' + safeText(context.suppliedEmail),
+                'Is Internal Forward (vantor.com/maxar.com sender): ' + String.valueOf(context.isInternalForward),
+                'Resolved External Customer Email: ' + safeText(context.externalSenderEmail),
+                'Resolved External Customer Name: ' + safeText(context.externalSenderName),
+                'Resolved External Customer Domain: ' + safeText(context.externalSenderDomain),
+                'Email Content (internal forwarders should be ignored as the customer):',
+                safeText(context.emailContent),
+                'Candidate Accounts (pick matchedAccountId ONLY from these Ids, otherwise null):',
+                buildCandidateBlock(context.candidateAccounts)
             };
             return String.join(lines, '\n');
         }
 
+        private String buildCandidateBlock(List<CandidateAccount> candidates) {
+            if (candidates == null || candidates.isEmpty()) {
+                return '(no candidate accounts found)';
+            }
+            List<String> parts = new List<String>();
+            for (CandidateAccount candidate : candidates) {
+                parts.add('- accountId=' + candidate.accountId
+                    + '; name=' + safeText(candidate.name)
+                    + '; website=' + safeText(candidate.website)
+                    + '; region=' + safeText(candidate.region));
+            }
+            return String.join(parts, '\n');
+        }
+
         private String safeText(String value) {
             return String.isBlank(value) ? '(none)' : value;
-        }
-
-        private String extractDomain(String email) {
-            if (String.isBlank(email) || !email.contains('@')) {
-                return null;
-            }
-            return email.substringAfter('@').toLowerCase();
-        }
-
-        private Boolean isGovOrMilDomain(String domain) {
-            return !String.isBlank(domain) && (domain.endsWith('.gov') || domain.endsWith('.mil'));
         }
     }
 }
